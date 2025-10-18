@@ -5,6 +5,11 @@ import numpy as np
 import pandas as pd # <-- NEW: Import Pandas to handle structured features
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import sys
+import os
+
+# Add the current directory to Python path to import energy_theft
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # --- Configuration ---
 MODEL_PATH = 'energy_theft_model.joblib'
@@ -50,11 +55,37 @@ def predict():
                 return jsonify({
                     "error": f"Missing required feature: '{name}'"
                 }), 400
-            feature_dict[name] = [data[name]] # Wrap value in a list for the DataFrame constructor
+            feature_dict[name] = data[name]  # Direct assignment for the prediction function
 
-        # Convert the dictionary into a Pandas DataFrame.
-        # This guarantees the columns are present and in the correct order (FEATURE_NAMES).
-        features_df = pd.DataFrame(feature_dict, columns=FEATURE_NAMES)
+        # Use the prediction function from energy_theft.py
+        try:
+            # Import the prediction function
+            from energy_theft import predict_energy_theft
+            result = predict_energy_theft(feature_dict)
+            
+            if 'error' in result:
+                return jsonify(result), 400
+                
+            return jsonify(result)
+            
+        except ImportError:
+            # Fallback to direct model prediction if import fails
+            print("Warning: Could not import predict_energy_theft function, using direct model prediction")
+            
+            # Convert to DataFrame for direct model prediction
+            features_df = pd.DataFrame([feature_dict], columns=FEATURE_NAMES)
+            
+            # Make the prediction
+            prediction = model.predict(features_df)[0]
+            probability = model.predict_proba(features_df)[0][1]
+            
+            response = {
+                'prediction': int(prediction),
+                'probability': float(probability),
+                'is_theft': bool(prediction)
+            }
+            
+            return jsonify(response)
         
     except Exception as e:
         # Catch JSON parsing errors or other data-related issues
@@ -62,26 +93,6 @@ def predict():
             "error": "Invalid input format or data type.",
             "details": str(e)
         }), 400
-
-    # 3. Make the prediction
-    # The XGBoost model can predict directly on the DataFrame
-    prediction = model.predict(features_df)[0]
-    
-    # Get the probability for class 1 (Theft)
-    probability = model.predict_proba(features_df)[0][1]
-
-    # Convert native NumPy types to standard Python types for JSON serialization
-    prediction_result = int(prediction)
-    probability_result = float(probability)
-    
-    # 4. Return the result as JSON
-    response = {
-        'prediction': prediction_result,  # 1 for Theft, 0 for No Theft
-        'probability': probability_result,
-        'is_theft': bool(prediction_result)
-    }
-
-    return jsonify(response)
 
 if __name__ == '__main__':
     # Run the Flask app on a specific port (e.g., 5000)

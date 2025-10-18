@@ -13,18 +13,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, accuracy_score
 from imblearn.over_sampling import SMOTE 
 import optuna
 import joblib
+import sklearn.utils
 
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION & FILE PATHS ---
-PROJECT_ROOT = '/home/swathi/energy_theft_project'
-RAW_INPUT_FILE = os.path.join(PROJECT_ROOT, 'data', 'consumption_data.csv')
-CLEANED_OUTPUT_FILE = os.path.join(PROJECT_ROOT, 'data', 'cleaned_features.csv')
-PLOTS_DIR = os.path.join(PROJECT_ROOT, 'plots')
+PROJECT_ROOT = r"C:\Users\srish\OneDrive\Documents\data set.csv\data set.csv"
+RAW_INPUT_FILE = PROJECT_ROOT
+CLEANED_OUTPUT_FILE = r"C:\Users\srish\OneDrive\Documents\cleaned_features.csv"
+PLOTS_DIR = r"C:\Users\srish\OneDrive\Documents\energy_theft_data\plots"
 
 CUSTOMER_ID_COL_NAME = 'CONS_NO'
 FLAG_COLUMN = 'FLAG'
@@ -89,7 +90,6 @@ df_long['Consumption_Diff'] = df_long.groupby(CUSTOMER_ID_COL_NAME)[VALUE_COL_NA
 df_long['Consumption_Lag1'] = df_long.groupby(CUSTOMER_ID_COL_NAME)[VALUE_COL_NAME].shift(1)
 df_long['Month'] = df_long['Date'].dt.month
 
-
 # 2. Aggregation (Creating the Features DataFrame)
 features = df_long.groupby(CUSTOMER_ID_COL_NAME).agg(
     # Basic Aggregates
@@ -109,13 +109,11 @@ features = df_long.groupby(CUSTOMER_ID_COL_NAME).agg(
     FLAG=(FLAG_COLUMN, 'max')
 ).reset_index()
 
-
 # --- NEW: Z-SCORE OUTLIER FEATURE ---
 features['cons_total_zscore'] = (
     features['cons_total'] - features['cons_total'].mean()
 ) / features['cons_total'].std()
 # --- END NEW Z-SCORE FEATURE ---
-
 
 # Final cleaning and saving
 features = features.fillna(0)
@@ -126,110 +124,124 @@ features.columns = ['CONS_NO', 'cons_mean', 'cons_total',
 print("Successfully created advanced Z-Score and time-series features.")
 features.to_csv(CLEANED_OUTPUT_FILE, index=False)
 
+# --- 4. DATA AUGMENTATION FOR BALANCED TRAINING ---
 
-# --- 4. MODELING AND RESAMPLING ---
+print("\n--- DATA AUGMENTATION ---")
+print("FLAG distribution in original data:")
+print(df["FLAG"].value_counts())
 
-X = features.drop([CUSTOMER_ID_COL_NAME, FLAG_COLUMN], axis=1)
-y = features[FLAG_COLUMN]
+# Separate theft rows
+theft_data = df[df["FLAG"] == 1]
 
-# Check the true imbalance ratio
-true_theft_count = y.sum()
-true_normal_count = len(y) - true_theft_count
-print(f"\nTRUE Target Distribution (Real Imbalance):\nNormal (0): {true_normal_count}\nTheft (1): {true_theft_count}")
+# Set ratio (1 for equal, 2 for double, etc.)
+ratio = 1
+n_synthetic = int(len(theft_data) * ratio)
 
+# Sample with replacement
+theft_sampled = theft_data.sample(n=n_synthetic, replace=True, random_state=42)
 
+# Add small noise to numeric features
+for col in theft_sampled.select_dtypes(include=['float64', 'int64']).columns:
+    if col != 'FLAG':  # Don't add noise to the target variable
+        theft_sampled[col] += np.random.normal(0, 0.05 * df[col].std(), size=n_synthetic)
+
+# Combine original + synthetic
+df_augmented = pd.concat([df, theft_sampled], ignore_index=True)
+print("Original theft:", len(theft_data))
+print("Synthetic theft:", n_synthetic)
+print("Final dataset shape:", df_augmented.shape)
+
+# --- 5. PREPARE DATA FOR MODELING ---
+
+# Separate features and target
+X = df_augmented.drop("FLAG", axis=1)
+y = df_augmented["FLAG"]
+
+# Shuffle entire dataset first
+X, y = sklearn.utils.shuffle(X, y, random_state=42)
+
+# Ensure target is integer
+y = y.astype(int)
+
+# Drop ID column
+X = X.drop(columns=['CONS_NO'])
+
+# Shuffle entire dataset
+X, y = sklearn.utils.shuffle(X, y, random_state=42)
+
+# Train/test split (stratify by FLAG)
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=y, random_state=42
+    X, y, test_size=0.2, random_state=42, stratify=y
 )
 
-# SMOTE Resampling for Training Data
-sm = SMOTE(random_state=42)
-X_res, y_res = sm.fit_resample(X_train, y_train)
-print(f"SMOTE Resampled Training Shape: {X_res.shape}")
-print(f"SMOTE Resampled Target Distribution:\n{y_res.value_counts()}")
+print("\nTrain shape:", X_train.shape)
+print("Test shape:", X_test.shape)
+print("Train class counts:\n", y_train.value_counts())
+print("Test class counts:\n", y_test.value_counts())
 
-# --- Initial Model Training (Using Resampled Data) ---
-model = xgb.XGBClassifier(
-    objective="binary:logistic",
-    eval_metric="auc",
-    n_estimators=300,
-    learning_rate=0.1,
+# Ensure target is integer 0/1
+y_train = y_train.astype(int)
+y_test = y_test.astype(int)
+
+# Automatically convert object columns to category
+for col in X_train.select_dtypes(include='object').columns:
+    X_train[col] = X_train[col].astype('category')
+    X_test[col] = X_test[col].astype('category')
+
+# --- 6. MODEL TRAINING ---
+
+print("\n--- TRAINING XGBOOST MODEL ---")
+
+# Calculate scale_pos_weight for imbalanced data
+scale_pos_weight = (y_train==0).sum() / (y_train==1).sum()
+print(f"Scale pos weight: {scale_pos_weight}")
+
+xgb_clf = xgb.XGBClassifier(
+    n_estimators=200,
     max_depth=6,
-    random_state=42
+    learning_rate=0.1,
+    scale_pos_weight=scale_pos_weight,
+    random_state=42,
+    use_label_encoder=False,
+    eval_metric='logloss',
+    enable_categorical=True  # important
 )
-model.fit(X_res, y_res) 
 
-y_prob = model.predict_proba(X_test)[:, 1]
+xgb_clf.fit(X_train, y_train)
 
-print("\n--- INITIAL MODEL RESULTS (Trained with SMOTE) ---")
-print("ROC-AUC Score:", roc_auc_score(y_test, y_prob))
+# Predict classes
+y_pred = xgb_clf.predict(X_test)
 
+# Predict probabilities for ROC-AUC
+y_proba = xgb_clf.predict_proba(X_test)[:, 1]  # probability of FLAG=1
 
-# --- 5. OPTUNA TUNING (Using Resampled Data for Training) ---
+# --- 7. MODEL EVALUATION ---
 
-def objective(trial):
-    params = {
-        "objective": "binary:logistic",
-        "eval_metric": "auc",
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2),
-        "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-        "random_state": 42
-    }
-    model = xgb.XGBClassifier(**params)
-    model.fit(X_res, y_res, eval_set=[(X_test, y_test)], verbose=False) 
-    preds = model.predict_proba(X_test)[:,1]
-    return roc_auc_score(y_test, preds)
+print("\n--- MODEL EVALUATION ---")
 
-print("\n--- OPTUNA TUNING (30 Trials) ---")
-try:
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=30, show_progress_bar=False) 
-    
-    print("Best Params (from Optuna study):\n", study.best_params)
-    
-    best_params = study.best_params
-    best_params["random_state"] = 42 
-    
-except Exception as e:
-    print(f"Optuna error. Falling back to hardcoded parameters.")
-    best_params = {
-        "objective": "binary:logistic",
-        "eval_metric": "auc",
-        "max_depth": 3,
-        "learning_rate": 0.1623391231965192,
-        "n_estimators": 236,
-        "subsample": 0.99904295023646,
-        "colsample_bytree": 0.7592636429453455,
-        "min_child_weight": 4,
-        "random_state": 42
-    }
+# Accuracy
+acc = accuracy_score(y_test, y_pred)
+print("Accuracy:", acc)
 
+# Confusion matrix
+cm = confusion_matrix(y_test, y_pred)
+print("Confusion Matrix:\n", cm)
 
-# Final Model Training and Evaluation
-final_model = xgb.XGBClassifier(**best_params)
-final_model.fit(X_res, y_res)
+# Classification Report
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred))
 
-y_pred_final = final_model.predict(X_test)
-y_prob_final = final_model.predict_proba(X_test)[:,1]
+# ROC-AUC Score
+roc_auc = roc_auc_score(y_test, y_proba)
+print(f"ROC-AUC Score: {roc_auc}")
 
-print("\n--- FINAL MODEL RESULTS (Tuned with SMOTE) ---")
-print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred_final))
-print("\nClassification Report:\n", classification_report(y_test, y_pred_final))
-print("\nROC-AUC Score:", roc_auc_score(y_test, y_prob_final))
+# --- 8. SAVE THE MODEL ---
 
+model_filename = 'energy_theft_model.joblib'
+joblib.dump(xgb_clf, model_filename)
+print(f"\n✅ Trained model successfully saved to {model_filename}")
 
-# 1. Define the filename for the saved model
-model_filename = 'energy_theft_model.joblib' 
-
-# 2. Use joblib.dump() to save the trained model object to the file
-joblib.dump(model, model_filename)
-
-print(f"✅ Trained model successfully saved to {model_filename}")
-# --- 6. VISUALIZATION (Plots are saved to the PLOTS_DIR) ---
+# --- 9. VISUALIZATION ---
 
 print(f"\n--- VISUALIZATION (Saving Plots to files in the '{PLOTS_DIR}' directory) ---")
 
@@ -262,10 +274,7 @@ plt.title("Feature Correlation Heatmap (Advanced Features)")
 plt.savefig(os.path.join(PLOTS_DIR, '04_feature_correlation_heatmap.png'))
 plt.close()
 
-
-# --- RE-ADDED MISSING PLOTS ---
-
-# Plot 5: Consumption Trends for Sample Customers (Saves three files: 05_customer_1_trend.png, etc.)
+# Plot 5: Consumption Trends for Sample Customers
 sample_customers = df_long[CUSTOMER_ID_COL_NAME].unique()[:3]
 for i, cust in enumerate(sample_customers):
     cust_data = df_long[df_long[CUSTOMER_ID_COL_NAME] == cust]
@@ -291,41 +300,36 @@ plt.close()
 
 print(f"✅ All 6 plots saved to the '{PLOTS_DIR}' directory.")
 print("--- PIPELINE COMPLETE ---")
-'''
-# --- 6. VISUALIZATION (Saving to Files) ---
-print(f"\n--- VISUALIZATION (Saving Plots to files in the '{PLOTS_DIR}' directory) ---")
 
-# Plot 1: Class Distribution
-plt.figure(figsize=(8, 5))
-sns.countplot(x="FLAG", data=features)
-plt.title("Class Distribution (Normal vs Theft) - REAL LABELS")
-plt.savefig(os.path.join(PLOTS_DIR, '01_class_distribution_REAL.png'))
-plt.close()
+# --- 10. PREDICTION FUNCTION FOR API ---
 
-# ... (Rest of the plotting logic remains the same for analysis) ...
+def predict_energy_theft(features_dict):
+    """
+    Function to predict energy theft for new data
+    Args:
+        features_dict: Dictionary with keys ['cons_mean', 'cons_total', 'diff_std', 'lag1_corr', 'month_std', 'cons_total_zscore']
+    Returns:
+        dict: Prediction result with 'prediction', 'probability', 'is_theft'
+    """
+    try:
+        # Convert to DataFrame
+        feature_df = pd.DataFrame([features_dict])
+        
+        # Make prediction
+        prediction = xgb_clf.predict(feature_df)[0]
+        probability = xgb_clf.predict_proba(feature_df)[0][1]
+        
+        return {
+            'prediction': int(prediction),
+            'probability': float(probability),
+            'is_theft': bool(prediction)
+        }
+    except Exception as e:
+        return {
+            'error': f'Prediction failed: {str(e)}',
+            'prediction': 0,
+            'probability': 0.0,
+            'is_theft': False
+        }
 
-# Plot 4: Distribution of Z-Score
-plt.figure(figsize=(8, 5))
-sns.kdeplot(data=features, x="cons_total_zscore", hue="FLAG", fill=True)
-plt.title("Distribution of Total Consumption Z-Score")
-plt.savefig(os.path.join(PLOTS_DIR, '04_zscore_distribution.png'))
-plt.close()
-
-# Plot 5: Distribution of Consumption Variability
-plt.figure(figsize=(8, 5))
-sns.kdeplot(data=features, x="diff_std", hue="FLAG", fill=True)
-plt.title("Distribution of Daily Consumption Variability (diff_std)")
-plt.savefig(os.path.join(PLOTS_DIR, '05_diff_std_distribution.png'))
-plt.close()
-
-# Plot 6: Feature Correlation Heatmap
-corr = features.drop([CUSTOMER_ID_COL_NAME, FLAG_COLUMN], axis=1).corr()
-plt.figure(figsize=(10,8))
-sns.heatmap(corr, cmap="coolwarm", annot=False)
-plt.title("Feature Correlation Heatmap")
-plt.savefig(os.path.join(PLOTS_DIR, '06_feature_correlation_heatmap.png'))
-plt.close()
-
-print(f"✅ All 6 plots saved to the '{PLOTS_DIR}' directory.")
-print("--- PIPELINE COMPLETE ---")
-'''
+print("\n✅ Prediction function ready for API integration")

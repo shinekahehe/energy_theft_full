@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 // Configuration
 //const API_URL = 'http://127.0.0.1:5000/predict';
 
-const API_URL = 'https://my-energy-api.onrender.com/predict'; // Example public URL
+const API_URL = 'http://localhost:3001/api/predict_theft'; // Local Node.js backend
 // Define the structure and initial state for the 6 features
 const initialFeatures = {
     cons_mean: 250.5,
@@ -48,15 +48,19 @@ const App = () => {
         setPredictionResult(null);
 
         // 2. Validate input and prepare payload
-        const payload = {};
+        const payload = { features: [] };
         let isValid = true;
         
-        for (const [key, value] of Object.entries(features)) {
+        // Convert features object to array in the correct order
+        const featureOrder = ['cons_mean', 'cons_total', 'diff_std', 'lag1_corr', 'month_std', 'cons_total_zscore'];
+        
+        for (const key of featureOrder) {
+            const value = features[key];
             if (isNaN(value) || value === null) {
                 isValid = false;
                 break;
             }
-            payload[key] = value;
+            payload.features.push(value);
         }
         
         if (!isValid) {

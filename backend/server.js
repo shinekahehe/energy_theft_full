@@ -32,8 +32,15 @@ app.post('/api/predict_theft', async (req, res) => {
 
         console.log('Forwarding data to Python API...');
 
-        // Transform the features array into the format expected by Python API
-        const featureNames = ['cons_mean', 'cons_total', 'diff_std', 'lag1_corr', 'month_std', 'cons_total_zscore'];
+        // Transform the features array into the format expected by Python API (IsolationForest v2)
+        const featureNames = [
+          't_kWh', 'z_Avg Voltage (Volt)', 'z_Avg Current (Amp)', 'y_Freq (Hz)',
+          'hour', 'day_of_week', 'is_weekend', 'is_peak_hour',
+          'kwh_change', 'kwh_vs_yesterday', 'power_ratio',
+          'apparent_power', 'load_factor', 'volt_dev', 'freq_dev',
+          'group_kwh_zscore', 'rolling_mean_kwh', 'rolling_std_kwh',
+          'voltage_drop', 'load_spike', 'supply_instability'
+        ];
         const pythonPayload = {};
         
         for (let i = 0; i < featureNames.length && i < inputData.features.length; i++) {

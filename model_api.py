@@ -12,25 +12,28 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # --- Configuration ---
-MODEL_PATH = 'energy_theft_model.joblib'
+# Updated to IsolationForest v2 artifacts produced by energy_theft.py
+MODEL_PATH = r'D:\energy_theft\outputs\energy_theft_isoforest_v2.pkl'
+SCALER_PATH = r'D:\energy_theft\outputs\energy_theft_scaler_v2.pkl'
 
-# The 6 features the model expects, in the EXACT order they were trained:
+# The IsolationForest expects the following engineered features in EXACT order
 FEATURE_NAMES = [
-    'cons_mean',
-    'cons_total',
-    'diff_std',
-    'lag1_corr',
-    'month_std',
-    'cons_total_zscore'
+    't_kWh', 'z_Avg Voltage (Volt)', 'z_Avg Current (Amp)', 'y_Freq (Hz)',
+    'hour', 'day_of_week', 'is_weekend', 'is_peak_hour',
+    'kwh_change', 'kwh_vs_yesterday', 'power_ratio',
+    'apparent_power', 'load_factor', 'volt_dev', 'freq_dev',
+    'group_kwh_zscore', 'rolling_mean_kwh', 'rolling_std_kwh',
+    'voltage_drop', 'load_spike', 'supply_instability'
 ]
 
-# 1. Load the model once when the server starts
+# 1. Load the model and scaler once when the server starts
 try:
     model = joblib.load(MODEL_PATH)
-    print(f"✅ Model loaded successfully from {MODEL_PATH}")
+    scaler = joblib.load(SCALER_PATH)
+    print(f"✅ Model loaded from {MODEL_PATH}")
+    print(f"✅ Scaler loaded from {SCALER_PATH}")
 except Exception as e:
-    print(f"❌ Error loading model: {e}")
-    # Note: In a production environment, you would log the error and might not exit immediately.
+    print(f"❌ Error loading model/scaler: {e}")
     exit()
 
 
@@ -55,37 +58,25 @@ def predict():
                 return jsonify({
                     "error": f"Missing required feature: '{name}'"
                 }), 400
-            feature_dict[name] = data[name]  # Direct assignment for the prediction function
+            feature_dict[name] = data[name]
 
-        # Use the prediction function from energy_theft.py
-        try:
-            # Import the prediction function
-            from energy_theft import predict_energy_theft
-            result = predict_energy_theft(feature_dict)
-            
-            if 'error' in result:
-                return jsonify(result), 400
-                
-            return jsonify(result)
-            
-        except ImportError:
-            # Fallback to direct model prediction if import fails
-            print("Warning: Could not import predict_energy_theft function, using direct model prediction")
-            
-            # Convert to DataFrame for direct model prediction
-            features_df = pd.DataFrame([feature_dict], columns=FEATURE_NAMES)
-            
-            # Make the prediction
-            prediction = model.predict(features_df)[0]
-            probability = model.predict_proba(features_df)[0][1]
-            
-            response = {
-                'prediction': int(prediction),
-                'probability': float(probability),
-                'is_theft': bool(prediction)
-            }
-            
-            return jsonify(response)
+        # Convert to DataFrame and scale
+        features_df = pd.DataFrame([feature_dict], columns=FEATURE_NAMES)
+        X_scaled = scaler.transform(features_df)
+
+        # IsolationForest outputs: decision_function (higher is normal), predict (1 normal, -1 anomaly)
+        anomaly_score = float(model.decision_function(X_scaled)[0])
+        raw_label = int(model.predict(X_scaled)[0])  # 1 normal, -1 anomaly
+        # Map to theft label: 1 = theft, 0 = normal (align to prior API contract is_theft)
+        theft_label = 1 if raw_label == -1 else 0
+
+        response = {
+            'prediction': theft_label,
+            'probability': None,  # Not applicable for IsolationForest; left as None
+            'is_theft': bool(theft_label),
+            'anomaly_score': anomaly_score
+        }
+        return jsonify(response)
         
     except Exception as e:
         # Catch JSON parsing errors or other data-related issues

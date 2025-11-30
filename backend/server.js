@@ -26,13 +26,7 @@ app.post('/api/predict_theft', async (req, res) => {
     try {
         const inputData = req.body; 
 
-        if (!inputData.features || !Array.isArray(inputData.features)) {
-            return res.status(400).json({ error: "Invalid data format. Expected an array of features." });
-        }
-
-        console.log('Forwarding data to Python API...');
-
-        // Transform the features array into the format expected by Python API (IsolationForest v2)
+        // Accept either { features: [...] } OR { 't_kWh': ..., 'z_Avg Voltage (Volt)': ..., ... }
         const featureNames = [
           't_kWh', 'z_Avg Voltage (Volt)', 'z_Avg Current (Amp)', 'y_Freq (Hz)',
           'hour', 'day_of_week', 'is_weekend', 'is_peak_hour',
@@ -41,10 +35,22 @@ app.post('/api/predict_theft', async (req, res) => {
           'group_kwh_zscore', 'rolling_mean_kwh', 'rolling_std_kwh',
           'voltage_drop', 'load_spike', 'supply_instability'
         ];
-        const pythonPayload = {};
-        
-        for (let i = 0; i < featureNames.length && i < inputData.features.length; i++) {
-            pythonPayload[featureNames[i]] = inputData.features[i];
+
+        let pythonPayload = {};
+
+        if (inputData && Array.isArray(inputData.features)) {
+            // Array -> map by position
+            for (let i = 0; i < featureNames.length; i++) {
+                pythonPayload[featureNames[i]] = inputData.features[i] ?? null;
+            }
+        } else if (inputData && typeof inputData === 'object') {
+            // Object -> pick values by name (preferred)
+            for (const k of featureNames) {
+                // if missing, set null - Python API will validate and return an informative error
+                pythonPayload[k] = Object.prototype.hasOwnProperty.call(inputData, k) ? inputData[k] : null;
+            }
+        } else {
+            return res.status(400).json({ error: "Invalid input format. Send { features: [...] } or an object with feature keys." });
         }
 
         console.log('Transformed payload for Python API:', pythonPayload);
@@ -53,11 +59,16 @@ app.post('/api/predict_theft', async (req, res) => {
         const pythonResponse = await axios.post(PYTHON_API_URL, pythonPayload);
 
         // Forward the prediction result back to the React frontend
-        res.json(pythonResponse.data);
+        res.status(pythonResponse.status).json(pythonResponse.data);
 
     } catch (error) {
-        console.error('Error calling Python API or processing request:', error.message);
-        res.status(500).json({ error: 'Failed to get prediction.', detail: error.message });
+                console.error('Error calling Python API or processing request:', error?.message);
+                if (error?.response) {
+                  const status = error.response.status || 500;
+                  const payload = typeof error.response.data === 'object' ? error.response.data : { error: String(error.response.data) };
+                  return res.status(status).json(payload);
+                }
+                res.status(500).json({ error: 'Failed to get prediction.', detail: error?.message });
     }
 });
 

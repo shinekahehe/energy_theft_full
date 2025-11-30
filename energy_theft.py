@@ -291,3 +291,43 @@ theft_candidates = (
 
 print("\n--- TOP 10 Potential Theft Candidates ---")
 print(theft_candidates.to_string(index=False))
+
+
+# ================================================================
+# STEP 5: Explainability Layer (SHAP)
+# ================================================================
+import shap
+import matplotlib.pyplot as plt
+
+print("\n🔍 Running SHAP explainability...")
+
+n_samples = 200  # or smaller for faster results
+X_sample = df_15min[features].sample(n=n_samples, random_state=42)
+X_scaled = scaler.transform(X_sample)
+
+explainer = shap.KernelExplainer(model.predict, X_scaled[:10])
+shap_values = explainer.shap_values(X_scaled)
+
+
+# ================================================================
+# STEP 6: Text-Only Explainability (Human-Readable)
+# ================================================================
+import shap
+import numpy as np
+
+def generate_text_explanation_fast(model, scaler, df_row, features):
+    X_scaled = scaler.transform(df_row)
+    background = X_scaled[:10]  # small background
+    explainer = shap.KernelExplainer(model.predict, background)
+    shap_values = explainer.shap_values(X_scaled[:1])  # explain one record
+
+    # Use top 3 impactful features
+    shap_abs = np.abs(shap_values[0])
+    top_idx = np.argsort(shap_abs)[::-1][:3]
+    top_features = [features[i] for i in top_idx]
+
+    explanation = (
+        "This meter was flagged as a potential theft due to anomalies in: "
+        + ", ".join(top_features) + "."
+    )
+    return explanation
